@@ -27,20 +27,22 @@
     .code{font-size:48px;letter-spacing:.12em;font-weight:900;text-align:center}
     .hidden{display:none}
     .status{padding:10px 12px;border-radius:10px;background:#f1f5f9;margin-top:10px}
-    ol{padding-left:22px}
+    ol{padding-left:26px}
+    li{padding:5px 0;font-size:18px}
     label{display:block;font-weight:700;margin:10px 0 6px}
+    .rank1{font-weight:900;font-size:21px}
   </style>
 </head>
 <body>
 <main>
   <h1>Buzzer da Turma</h1>
-  <p class="muted">Professor projeta as questões; os alunos usam apenas o botão de buzzer.</p>
+  <p class="muted">Professor projeta as questões; cada grupo pode registrar um único buzz por rodada.</p>
 
   <section id="start" class="card">
     <h2>Entrar</h2>
     <div class="row">
       <button id="hostBtn" class="primary">Sou professor</button>
-      <button id="playerBtn" class="secondary">Sou aluno</button>
+      <button id="playerBtn" class="secondary">Sou aluno / grupo</button>
     </div>
   </section>
 
@@ -53,7 +55,7 @@
         <button id="createRoom" class="primary">Criar nova sala</button>
         <button id="armRound" class="secondary" disabled>Liberar buzzer</button>
         <button id="resetRound" class="secondary" disabled>Nova rodada</button>
-        <button id="lockRound" class="danger" disabled>Bloquear</button>
+        <button id="lockRound" class="danger" disabled>Encerrar rodada</button>
       </div>
       <label>Som personalizado (MP3/WAV/OGG)</label>
       <input id="soundFile" type="file" accept="audio/*" />
@@ -64,9 +66,8 @@
     </div>
 
     <div class="card">
-      <h2>Resultado</h2>
+      <h2>Ranking da rodada</h2>
       <div id="winnerBox" class="winner">Aguardando rodada</div>
-      <h3>Cliques desta rodada</h3>
       <ol id="buzzList"></ol>
     </div>
   </section>
@@ -74,16 +75,16 @@
   <section id="player" class="hidden">
     <div class="card">
       <h2>Entrar na sala</h2>
-      <label>Seu nome</label>
-      <input id="playerName" type="text" maxlength="40" placeholder="Ex.: Ana" />
+      <label>Nome do grupo</label>
+      <input id="playerName" type="text" maxlength="40" placeholder="Ex.: Grupo 4" />
       <label>Código da sala</label>
       <input id="playerRoom" type="text" inputmode="numeric" maxlength="6" placeholder="123456" />
       <button id="joinRoom" class="primary" style="width:100%;margin-top:12px">Entrar</button>
-      <div id="playerStatus" class="status">Informe seu nome e o código da sala.</div>
+      <div id="playerStatus" class="status">Informe o grupo e o código da sala.</div>
     </div>
     <div class="card">
       <button id="buzzBtn" class="buzz" disabled>AGUARDE</button>
-      <p class="muted" style="text-align:center">Quando o professor liberar, o botão ficará verde.</p>
+      <p class="muted" style="text-align:center">Cada grupo pode apertar uma vez por rodada.</p>
     </div>
   </section>
 </main>
@@ -92,10 +93,11 @@
   import { initializeApp } from "https://www.gstatic.com/firebasejs/12.2.1/firebase-app.js";
   import {
     getDatabase, ref, set, get, onValue, update, runTransaction,
-    push, serverTimestamp, remove
+    serverTimestamp, remove
   } from "https://www.gstatic.com/firebasejs/12.2.1/firebase-database.js";
 
-  // 1) Substitua pelos dados do seu projeto Firebase.
+  // IMPORTANTE:
+  // substitua este bloco pelo firebaseConfig que já está no seu index.html atual.
   const firebaseConfig = {
     apiKey: "AIzaSyAdy_kMMn9v0Xe0kpyr1Ah2GLu-4a4mzaw",
     authDomain: "buzzer-para-quiz.firebaseapp.com",
@@ -113,8 +115,9 @@
   const $ = (id) => document.getElementById(id);
   let currentRoom = null;
   let currentName = null;
+  let currentPlayerId = null;
   let audio = null;
-  let lastWinnerKey = null;
+  let lastSoundRank = 0;
 
   function show(id){
     $("start").classList.add("hidden");
@@ -128,6 +131,14 @@
 
   function makeRoomCode(){
     return String(Math.floor(100000 + Math.random()*900000));
+  }
+
+  function makePlayerId(name){
+    return name.trim().toLowerCase()
+      .normalize("NFD").replace(/[\u0300-\u036f]/g,"")
+      .replace(/[^a-z0-9]+/g,"-")
+      .replace(/^-+|-+$/g,"")
+      .slice(0,50) || "grupo";
   }
 
   async function createUniqueRoom(){
@@ -145,19 +156,19 @@
       currentRoom = code;
       await set(ref(db, `rooms/${code}`), {
         open:false,
-        winner:null,
         round:0,
+        nextRank:0,
         createdAt:serverTimestamp()
       });
       $("roomCode").textContent = code;
       const url = `${location.origin}${location.pathname}?room=${code}`;
       $("joinLink").textContent = url;
-      $("hostStatus").textContent = "Sala criada. Carregue/teste o som e libere a rodada.";
+      $("hostStatus").textContent = "Sala criada. Libere o buzzer quando a questão estiver pronta.";
       $("armRound").disabled = false;
       $("resetRound").disabled = false;
       $("lockRound").disabled = false;
       subscribeHost(code);
-    } catch(e){
+    }catch(e){
       $("hostStatus").textContent = "Erro: " + e.message;
     }
   });
@@ -184,11 +195,17 @@
     const roomRef = ref(db, `rooms/${currentRoom}`);
     const snap = await get(roomRef);
     const nextRound = (snap.val()?.round || 0) + 1;
-    await update(roomRef, {open, winner:null, round:nextRound});
+
+    await update(roomRef, {
+      open,
+      round:nextRound,
+      nextRank:0
+    });
     await remove(ref(db, `rooms/${currentRoom}/buzzes`));
+
     $("winnerBox").textContent = open ? "Buzzer liberado!" : "Rodada preparada";
     $("buzzList").innerHTML = "";
-    lastWinnerKey = null;
+    lastSoundRank = 0;
   }
 
   $("armRound").addEventListener("click", () => prepareRound(true));
@@ -197,34 +214,48 @@
     if(currentRoom) await update(ref(db, `rooms/${currentRoom}`), {open:false});
   });
 
+  function medal(rank){
+    if(rank === 1) return "🥇";
+    if(rank === 2) return "🥈";
+    if(rank === 3) return "🥉";
+    return `${rank}º`;
+  }
+
   function subscribeHost(code){
     onValue(ref(db, `rooms/${code}`), async (snap) => {
       const room = snap.val();
       if(!room) return;
-      const winner = room.winner;
-      $("hostStatus").textContent = room.open ? "Buzzer LIBERADO." : "Buzzer bloqueado.";
-      if(winner){
-        $("winnerBox").textContent = `🏆 ${winner.name}`;
-        const key = `${winner.name}-${winner.round}`;
-        if(key !== lastWinnerKey){
-          lastWinnerKey = key;
-          if(audio){
-            try{
-              audio.currentTime = 0;
-              await audio.play();
-            }catch{}
-          }
-        }
+
+      const buzzes = Object.values(room.buzzes || {}).sort((a,b)=>(a.rank||9999)-(b.rank||9999));
+
+      $("hostStatus").textContent = room.open
+        ? `Buzzer LIBERADO — ${buzzes.length} grupo(s) já responderam.`
+        : `Rodada encerrada — ${buzzes.length} grupo(s) responderam.`;
+
+      if(buzzes.length){
+        $("winnerBox").textContent = `🏆 ${buzzes[0].name}`;
       }else{
         $("winnerBox").textContent = room.open ? "Aguardando o primeiro clique…" : "Aguardando rodada";
       }
-      const buzzes = room.buzzes || {};
-      const items = Object.values(buzzes).sort((a,b)=>(a.at||0)-(b.at||0));
+
       $("buzzList").innerHTML = "";
-      for(const b of items){
+      for(const b of buzzes){
         const li = document.createElement("li");
-        li.textContent = b.name + (b.won ? " 🥇" : "");
+        if(b.rank === 1) li.className = "rank1";
+        li.textContent = `${medal(b.rank)} ${b.name}`;
         $("buzzList").appendChild(li);
+      }
+
+      // Toca o som para cada novo buzz recebido.
+      const highestRank = buzzes.reduce((m,b)=>Math.max(m,b.rank||0),0);
+      if(highestRank > lastSoundRank){
+        lastSoundRank = highestRank;
+        if(audio){
+          try{
+            audio.currentTime = 0;
+            await audio.play();
+          }catch{}
+        }
       }
     });
   }
@@ -238,18 +269,23 @@
   $("joinRoom").addEventListener("click", async () => {
     const name = $("playerName").value.trim();
     const room = $("playerRoom").value.trim();
+
     if(!name || !/^\d{6}$/.test(room)){
-      $("playerStatus").textContent = "Informe nome e código de 6 dígitos.";
+      $("playerStatus").textContent = "Informe o nome do grupo e o código de 6 dígitos.";
       return;
     }
+
     const snap = await get(ref(db, `rooms/${room}`));
     if(!snap.exists()){
       $("playerStatus").textContent = "Sala não encontrada.";
       return;
     }
+
     currentName = name;
+    currentPlayerId = makePlayerId(name);
     currentRoom = room;
-    $("playerStatus").textContent = `Conectado à sala ${room}.`;
+
+    $("playerStatus").textContent = `Conectado como “${name}” à sala ${room}.`;
     subscribePlayer(room);
   });
 
@@ -257,43 +293,61 @@
     onValue(ref(db, `rooms/${room}`), (snap) => {
       const data = snap.val();
       if(!data) return;
-      const ready = !!data.open && !data.winner;
+
+      const ownBuzz = data.buzzes?.[currentPlayerId];
+      const ready = !!data.open && !ownBuzz;
+
       $("buzzBtn").disabled = !ready;
       $("buzzBtn").classList.toggle("ready", ready);
-      $("buzzBtn").textContent = ready ? "BUZZ!" : (data.winner ? `Venceu: ${data.winner.name}` : "AGUARDE");
+
+      if(ownBuzz){
+        $("buzzBtn").textContent = `REGISTRADO — ${ownBuzz.rank}º`;
+        $("playerStatus").textContent = `Seu grupo ficou em ${ownBuzz.rank}º nesta rodada.`;
+      }else{
+        $("buzzBtn").textContent = ready ? "BUZZ!" : "AGUARDE";
+      }
     });
   }
 
   $("buzzBtn").addEventListener("click", async () => {
-    if(!currentRoom || !currentName) return;
+    if(!currentRoom || !currentName || !currentPlayerId) return;
+
     $("buzzBtn").disabled = true;
+    $("playerStatus").textContent = "Registrando…";
 
     const roomRef = ref(db, `rooms/${currentRoom}`);
-    const roomSnap = await get(roomRef);
-    const room = roomSnap.val();
-    if(!room?.open || room?.winner){
-      $("playerStatus").textContent = "Rodada já encerrada.";
+
+    // Uma única transação modifica o ranking inteiro.
+    // Isso evita empates e garante uma única posição por grupo.
+    const result = await runTransaction(roomRef, (room) => {
+      if(!room || !room.open) return;
+      room.buzzes = room.buzzes || {};
+
+      // O mesmo grupo só entra uma vez na rodada.
+      if(room.buzzes[currentPlayerId]) return room;
+
+      const rank = (room.nextRank || 0) + 1;
+      room.nextRank = rank;
+      room.buzzes[currentPlayerId] = {
+        name: currentName,
+        rank,
+        clientAt: Date.now()
+      };
+      return room;
+    }, {applyLocally:false});
+
+    if(!result.committed){
+      $("playerStatus").textContent = "A rodada já foi encerrada.";
       return;
     }
 
-    const winnerRef = ref(db, `rooms/${currentRoom}/winner`);
-    const result = await runTransaction(winnerRef, (current) => {
-      if(current !== null) return;
-      return {name: currentName, round: room.round || 0, at: Date.now()};
-    }, {applyLocally:false});
+    const finalRoom = result.snapshot.val();
+    const ownBuzz = finalRoom?.buzzes?.[currentPlayerId];
 
-    const won = result.committed;
-    await push(ref(db, `rooms/${currentRoom}/buzzes`), {
-      name: currentName,
-      won,
-      at: serverTimestamp()
-    });
-
-    if(won){
-      await update(ref(db, `rooms/${currentRoom}`), {open:false});
-      $("playerStatus").textContent = "Você foi o primeiro! 🏆";
+    if(ownBuzz){
+      $("playerStatus").textContent = `Registrado: ${ownBuzz.rank}º lugar.`;
     }else{
-      $("playerStatus").textContent = "Outro aluno chegou primeiro.";
+      $("playerStatus").textContent = "Não foi possível registrar o clique.";
     }
   });
 </script>
