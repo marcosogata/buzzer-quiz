@@ -351,7 +351,7 @@
       $("buzzBtn").classList.toggle("ready", ready);
 
       if(ownBuzz){
-        $("buzzBtn").textContent = `REGISTRADO — ${ownBuzz.rank}º`;
+        $("buzzBtn").textContent = `REGISTRADO (${ownBuzz.rank}º)`;
         $("playerStatus").textContent = `Seu grupo ficou em ${ownBuzz.rank}º nesta rodada.`;
       }else{
         $("buzzBtn").textContent = ready ? "BUZZ!" : "AGUARDE";
